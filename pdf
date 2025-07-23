@@ -1,0 +1,772 @@
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.pdfbox.pdmodel.PDDocumentInformation;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
+import java.io.*;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.URI;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
+import java.util.stream.Collectors;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
+/**
+
+- Advanced PDF Terms & Conditions Crawler
+- Crawl PDF documents and convert to structured JSON format
+  */
+  public class PDFTCCrawler {
+  
+  private static final HttpClient httpClient = HttpClient.newBuilder()
+  .connectTimeout(Duration.ofSeconds(60))
+  .followRedirects(HttpClient.Redirect.NORMAL)
+  .build();
+  
+  private static final ObjectMapper objectMapper = new ObjectMapper()
+  .enable(SerializationFeature.INDENT_OUTPUT);
+  
+  // User agents để tránh bị block
+  private static final String[] USER_AGENTS = {
+  “Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36”,
+  “Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36”,
+  “Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0”
+  };
+  
+  // Section headers patterns
+  private static final String[] SECTION_PATTERNS = {
+  “^\d+\.\s+.*”, // 1. Section Title
+  “^\d+\.\d+\s+.*”, // 1.1 Subsection
+  “^[A-Z]+:”, // Title:
+  “^[A-Z\s]{3,}$”, // ALL CAPS TITLE
+  “^\([a-z]\)\s+.*”, // (a) item
+  “^\([0-9]+\)\s+.*”, // (1) item
+  “^[A-Z]\.\s+.*”, // A. Section
+  “^Article\s+\d+”, // Article 1
+  “^Section\s+\d+”, // Section 1
+  “^Part\s+[IVX]+”, // Part I, II, III
+  “^Chapter\s+\d+” // Chapter 1
+  };
+  
+  // Keywords để detect legal sections
+  private static final String[] LEGAL_KEYWORDS = {
+  “terms”, “conditions”, “agreement”, “privacy”, “policy”, “liability”,
+  “intellectual property”, “copyright”, “trademark”, “patent”, “license”,
+  “dispute”, “arbitration”, “governing law”, “jurisdiction”, “termination”,
+  “cancellation”, “payment”, “billing”, “refund”, “data protection”,
+  “confidentiality”, “non-disclosure”, “warranty”, “disclaimer”, “limitation”,
+  “indemnification”, “force majeure”, “modification”, “amendment”,
+  “compliance”, “regulatory”, “audit”, “security”, “breach”, “damages”
+  };
+  
+  // Temp directory for downloaded PDFs
+  private static final String TEMP_DIR = “temp_pdfs”;
+  
+  public static void main(String[] args) {
+  PDFTCCrawler crawler = new PDFTCCrawler();
+  
+  ```
+   // Test PDF URLs
+   List<String> testPdfUrls = Arrays.asList(
+       "https://policies.google.com/terms?hl=en&gl=US&format=pdf",
+       "https://www.anthropic.com/terms.pdf",
+       "https://openai.com/policies/terms-of-use.pdf",
+       "https://github.com/site/terms.pdf",
+       "https://stripe.com/legal/tos.pdf"
+   );
+   
+   // Create temp directory
+   try {
+       Files.createDirectories(Paths.get(TEMP_DIR));
+   } catch (IOException e) {
+       System.err.println("Failed to create temp directory: " + e.getMessage());
+       return;
+   }
+   
+   for (String pdfUrl : testPdfUrls) {
+       try {
+           System.out.println("\n=== Processing PDF: " + pdfUrl + " ===");
+           TCDocument doc = crawler.crawlPDFTermsAndConditions(pdfUrl);
+           
+           if (doc != null) {
+               String filename = extractDomainName(pdfUrl) + "_terms_pdf.json";
+               crawler.saveToJson(doc, filename);
+               
+               System.out.println("✓ Success: " + doc.sections.size() + " sections, " + 
+                   doc.metadata.totalWords + " words");
+               System.out.println("Quality Score: " + doc.metadata.qualityScore + "/100");
+           } else {
+               System.out.println("✗ Failed to process PDF");
+           }
+           
+           // Delay để tránh rate limiting
+           Thread.sleep(3000);
+           
+       } catch (Exception e) {
+           System.err.println("Error processing " + pdfUrl + ": " + e.getMessage());
+           e.printStackTrace();
+       }
+   }
+   
+   // Cleanup temp directory
+   crawler.cleanupTempFiles();
+  ```
+  
+  }
+  
+  /**
+  - Main method để crawl PDF T&C
+    */
+    public TCDocument crawlPDFTermsAndConditions(String pdfUrl) {
+    try {
+    System.out.println(“Downloading PDF: “ + pdfUrl);
+    String localFilePath = downloadPDF(pdfUrl);
+    
+    ```
+     System.out.println("Extracting text from PDF...");
+     PDFContent pdfContent = extractTextFromPDF(localFilePath);
+     
+     System.out.println("Parsing content to structured format...");
+     return parsePDFContentToTC(pdfContent, pdfUrl);
+    ```
+    
+    } catch (Exception e) {
+    System.err.println(“PDF crawling failed: “ + e.getMessage());
+    return null;
+    }
+    }
+  
+  /**
+  - Download PDF từ URL
+    */
+    private String downloadPDF(String pdfUrl) throws IOException, InterruptedException {
+    String fileName = extractFileName(pdfUrl);
+    String localPath = TEMP_DIR + “/” + fileName;
+    
+    // Skip if already downloaded
+    if (Files.exists(Paths.get(localPath))) {
+    System.out.println(“PDF already exists locally: “ + localPath);
+    return localPath;
+    }
+    
+    int maxRetries = 3;
+    IOException lastException = null;
+    
+    for (int attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+    String userAgent = USER_AGENTS[(attempt - 1) % USER_AGENTS.length];
+    
+    ```
+         HttpRequest request = HttpRequest.newBuilder()
+                 .uri(URI.create(pdfUrl))
+                 .header("User-Agent", userAgent)
+                 .header("Accept", "application/pdf,*/*")
+                 .header("Accept-Language", "en-US,en;q=0.9")
+                 .timeout(Duration.ofMinutes(5)) // PDFs có thể lớn
+                 .build();
+         
+         HttpResponse<byte[]> response = httpClient.send(request, 
+             HttpResponse.BodyHandlers.ofByteArray());
+         
+         if (response.statusCode() == 200) {
+             Files.write(Paths.get(localPath), response.body());
+             System.out.println("Downloaded: " + localPath + " (" + 
+                 response.body().length + " bytes)");
+             return localPath;
+         } else if (response.statusCode() == 429 || response.statusCode() == 503) {
+             System.out.println("Rate limited, waiting " + (attempt * 2) + " seconds...");
+             Thread.sleep(attempt * 2000);
+             continue;
+         } else {
+             throw new IOException("HTTP " + response.statusCode() + " for " + pdfUrl);
+         }
+         
+     } catch (IOException e) {
+         lastException = e;
+         if (attempt < maxRetries) {
+             System.out.println("Download attempt " + attempt + " failed, retrying...");
+             Thread.sleep(1000 * attempt);
+         }
+     }
+    ```
+    
+    }
+    
+    throw new IOException(“Failed to download after “ + maxRetries + “ attempts”, lastException);
+    }
+  
+  /**
+  - Extract text và metadata từ PDF
+    */
+    private PDFContent extractTextFromPDF(String filePath) throws IOException {
+    PDDocument document = null;
+    try {
+    document = PDDocument.load(new File(filePath));
+    
+    ```
+     // Extract metadata
+     PDDocumentInformation info = document.getDocumentInformation();
+     PDFMetadata metadata = new PDFMetadata(
+         info.getTitle(),
+         info.getAuthor(),
+         info.getSubject(),
+         info.getCreator(),
+         info.getProducer(),
+         info.getCreationDate() != null ? info.getCreationDate().toString() : null,
+         info.getModificationDate() != null ? info.getModificationDate().toString() : null,
+         document.getNumberOfPages()
+     );
+     
+     // Extract text page by page
+     PDFTextStripper stripper = new PDFTextStripper();
+     List<String> pageTexts = new ArrayList<>();
+     
+     for (int i = 1; i <= document.getNumberOfPages(); i++) {
+         stripper.setStartPage(i);
+         stripper.setEndPage(i);
+         String pageText = stripper.getText(document);
+         pageTexts.add(cleanPDFText(pageText));
+     }
+     
+     // Extract full text
+     stripper.setStartPage(1);
+     stripper.setEndPage(document.getNumberOfPages());
+     String fullText = stripper.getText(document);
+     
+     return new PDFContent(cleanPDFText(fullText), pageTexts, metadata);
+    ```
+    
+    } finally {
+    if (document != null) {
+    document.close();
+    }
+    }
+    }
+  
+  /**
+  - Parse PDF content thành structured T&C format
+    */
+    private TCDocument parsePDFContentToTC(PDFContent pdfContent, String sourceUrl) {
+    String fullText = pdfContent.fullText;
+    
+    // Detect document title
+    String title = detectDocumentTitle(pdfContent);
+    
+    // Extract sections
+    List<TCSection> sections = extractSectionsFromPDF(fullText);
+    
+    // Extract dates
+    String lastModified = detectLastModifiedFromPDF(pdfContent);
+    String effectiveDate = detectEffectiveDateFromPDF(fullText);
+    
+    // Generate metadata
+    TCMetadata metadata = generatePDFMetadata(pdfContent, sections);
+    
+    return new TCDocument(
+    extractDomainName(sourceUrl),
+    title,
+    sourceUrl,
+    LocalDateTime.now().toString(),
+    lastModified,
+    effectiveDate,
+    sections,
+    metadata
+    );
+    }
+  
+  /**
+  - Extract sections từ PDF text
+    */
+    private List<TCSection> extractSectionsFromPDF(String fullText) {
+    List<TCSection> sections = new ArrayList<>();
+    
+    // Split text into potential sections based on patterns
+    String[] lines = fullText.split(”\n”);
+    List<SectionCandidate> candidates = new ArrayList<>();
+    
+    for (int i = 0; i < lines.length; i++) {
+    String line = lines[i].trim();
+    if (line.isEmpty()) continue;
+    
+    ```
+     // Check if line matches section pattern
+     for (String pattern : SECTION_PATTERNS) {
+         if (Pattern.matches(pattern, line) && line.length() < 200) {
+             candidates.add(new SectionCandidate(i, line, pattern));
+             break;
+         }
+     }
+    ```
+    
+    }
+    
+    // Process section candidates
+    if (candidates.size() >= 2) {
+    sections = processSectionCandidates(candidates, lines);
+    } else {
+    // Fallback: split by paragraphs
+    sections = extractSectionsByParagraphs(fullText);
+    }
+    
+    return sections.isEmpty() ? createFallbackSections(fullText) : sections;
+    }
+  
+  /**
+  - Process section candidates thành actual sections
+    */
+    private List<TCSection> processSectionCandidates(List<SectionCandidate> candidates, String[] lines) {
+    List<TCSection> sections = new ArrayList<>();
+    
+    for (int i = 0; i < candidates.size(); i++) {
+    SectionCandidate current = candidates.get(i);
+    int startLine = current.lineIndex + 1;
+    int endLine = (i + 1 < candidates.size()) ?
+    candidates.get(i + 1).lineIndex : lines.length;
+    
+    ```
+     // Extract paragraphs for this section
+     List<String> paragraphs = new ArrayList<>();
+     StringBuilder currentParagraph = new StringBuilder();
+     
+     for (int j = startLine; j < endLine; j++) {
+         String line = lines[j].trim();
+         if (line.isEmpty()) {
+             if (currentParagraph.length() > 0) {
+                 paragraphs.add(currentParagraph.toString().trim());
+                 currentParagraph = new StringBuilder();
+             }
+         } else {
+             currentParagraph.append(line).append(" ");
+         }
+     }
+     
+     // Add last paragraph
+     if (currentParagraph.length() > 0) {
+         paragraphs.add(currentParagraph.toString().trim());
+     }
+     
+     // Filter out very short paragraphs
+     paragraphs = paragraphs.stream()
+         .filter(p -> p.length() > 20)
+         .collect(Collectors.toList());
+     
+     if (!paragraphs.isEmpty()) {
+         sections.add(new TCSection(
+             current.title,
+             detectSectionLevel(current.pattern),
+             paragraphs,
+             extractKeywords(paragraphs)
+         ));
+     }
+    ```
+    
+    }
+    
+    return sections;
+    }
+  
+  /**
+  - Extract sections by paragraphs (fallback method)
+    */
+    private List<TCSection> extractSectionsByParagraphs(String fullText) {
+    List<TCSection> sections = new ArrayList<>();
+    String[] paragraphs = fullText.split(”\n\n”);
+    
+    List<String> currentSection = new ArrayList<>();
+    String currentTitle = “Introduction”;
+    int sectionNumber = 1;
+    
+    for (String paragraph : paragraphs) {
+    String cleanPara = paragraph.trim().replaceAll(”\n”, “ “);
+    if (cleanPara.length() < 30) continue;
+    
+    ```
+     currentSection.add(cleanPara);
+     
+     // Create new section every 4-6 paragraphs or on topic change
+     if (currentSection.size() >= 5 || detectTopicChange(cleanPara)) {
+         sections.add(new TCSection(
+             currentTitle,
+             1,
+             new ArrayList<>(currentSection),
+             extractKeywords(currentSection)
+         ));
+         
+         currentSection.clear();
+         currentTitle = generateSectionTitle(cleanPara, sectionNumber);
+         sectionNumber++;
+     }
+    ```
+    
+    }
+    
+    // Add remaining paragraphs
+    if (!currentSection.isEmpty()) {
+    sections.add(new TCSection(
+    currentTitle,
+    1,
+    currentSection,
+    extractKeywords(currentSection)
+    ));
+    }
+    
+    return sections;
+    }
+  
+  /**
+  - Create fallback sections khi không detect được structure
+    */
+    private List<TCSection> createFallbackSections(String fullText) {
+    List<String> chunks = new ArrayList<>();
+    String[] sentences = fullText.split(”\. “);
+    
+    StringBuilder currentChunk = new StringBuilder();
+    int sentenceCount = 0;
+    
+    for (String sentence : sentences) {
+    currentChunk.append(sentence.trim()).append(”. “);
+    sentenceCount++;
+    
+    ```
+     if (sentenceCount >= 5) {
+         chunks.add(currentChunk.toString().trim());
+         currentChunk = new StringBuilder();
+         sentenceCount = 0;
+     }
+    ```
+    
+    }
+    
+    if (currentChunk.length() > 0) {
+    chunks.add(currentChunk.toString().trim());
+    }
+    
+    return Arrays.asList(new TCSection(
+    “Terms and Conditions”,
+    1,
+    chunks,
+    extractKeywords(chunks)
+    ));
+    }
+  
+  /**
+  - Utility methods
+    */
+    private String detectDocumentTitle(PDFContent pdfContent) {
+    // Try PDF metadata first
+    if (pdfContent.metadata.title != null && !pdfContent.metadata.title.trim().isEmpty()) {
+    return pdfContent.metadata.title.trim();
+    }
+    
+    // Try first few lines
+    String[] lines = pdfContent.fullText.split(”\n”);
+    for (int i = 0; i < Math.min(10, lines.length); i++) {
+    String line = lines[i].trim();
+    if (line.length() > 5 && line.length() < 100 &&
+    (line.toLowerCase().contains(“terms”) ||
+    line.toLowerCase().contains(“agreement”) ||
+    line.toLowerCase().contains(“policy”))) {
+    return line;
+    }
+    }
+    
+    return “Terms and Conditions”;
+    }
+  
+  private String detectLastModifiedFromPDF(PDFContent pdfContent) {
+  if (pdfContent.metadata.modificationDate != null) {
+  return pdfContent.metadata.modificationDate;
+  }
+  
+  ```
+   // Search in text
+   Pattern datePattern = Pattern.compile(
+       "(last\\s+(?:modified|updated|revised)\\s*:?\\s*([^.\\n]{5,30}))",
+       Pattern.CASE_INSENSITIVE
+   );
+   
+   Matcher matcher = datePattern.matcher(pdfContent.fullText);
+   if (matcher.find()) {
+       return matcher.group(2).trim();
+   }
+   
+   return pdfContent.metadata.creationDate;
+  ```
+  
+  }
+  
+  private String detectEffectiveDateFromPDF(String text) {
+  Pattern effectivePattern = Pattern.compile(
+  “effective\s+(?:date|as\s+of)?\s*:?\s*([^.\n]{5,30})”,
+  Pattern.CASE_INSENSITIVE
+  );
+  
+  ```
+   Matcher matcher = effectivePattern.matcher(text);
+   if (matcher.find()) {
+       return matcher.group(1).trim();
+   }
+   
+   return null;
+  ```
+  
+  }
+  
+  private int detectSectionLevel(String pattern) {
+  if (pattern.contains(”\d+\.\d+”)) return 2; // 1.1
+  if (pattern.contains(”\d+\.”)) return 1; // 1.
+  if (pattern.contains(”\([a-z]\)”)) return 3; // (a)
+  if (pattern.contains(”\([0-9]+\)”)) return 3; // (1)
+  return 1;
+  }
+  
+  private boolean detectTopicChange(String text) {
+  String lowerText = text.toLowerCase();
+  String[] topicIndicators = {
+  “privacy”, “data protection”, “payment”, “billing”, “liability”,
+  “intellectual property”, “dispute”, “termination”, “modification”,
+  “governing law”, “arbitration”, “warranty”, “disclaimer”
+  };
+  
+  ```
+   return Arrays.stream(topicIndicators)
+       .anyMatch(lowerText::contains);
+  ```
+  
+  }
+  
+  private String generateSectionTitle(String text, int sectionNumber) {
+  String[] words = text.split(”\s+”);
+  String title = Arrays.stream(words)
+  .limit(4)
+  .collect(Collectors.joining(” “));
+  
+  ```
+   // Capitalize first letter
+   if (title.length() > 0) {
+       title = title.substring(0, 1).toUpperCase() + 
+              (title.length() > 1 ? title.substring(1) : "");
+   }
+   
+   return title.isEmpty() ? "Section " + sectionNumber : title;
+  ```
+  
+  }
+  
+  private List<String> extractKeywords(List<String> paragraphs) {
+  Set<String> keywords = new HashSet<>();
+  String allText = String.join(” “, paragraphs).toLowerCase();
+  
+  ```
+   for (String keyword : LEGAL_KEYWORDS) {
+       if (allText.contains(keyword)) {
+           keywords.add(keyword);
+       }
+   }
+   
+   return new ArrayList<>(keywords);
+  ```
+  
+  }
+  
+  private String cleanPDFText(String text) {
+  return text
+  .replaceAll(”\r\n”, “\n”)
+  .replaceAll(”\r”, “\n”)
+  .replaceAll(”\s{2,}”, “ “)
+  .replaceAll(”\n{3,}”, “\n\n”)
+  .trim();
+  }
+  
+  private TCMetadata generatePDFMetadata(PDFContent pdfContent, List<TCSection> sections) {
+  String fullText = pdfContent.fullText;
+  
+  ```
+   // Basic stats
+   int totalChars = fullText.length();
+   int totalWords = fullText.split("\\s+").length;
+   int totalSections = sections.size();
+   
+   // Average section length
+   double avgSectionLength = sections.stream()
+       .mapToInt(s -> s.paragraphs.stream().mapToInt(String::length).sum())
+       .average().orElse(0.0);
+   
+   // Legal term counts
+   Map<String, Integer> legalTermCounts = new HashMap<>();
+   String lowerText = fullText.toLowerCase();
+   
+   for (String term : LEGAL_KEYWORDS) {
+       long count = Pattern.compile("\\b" + Pattern.quote(term) + "\\b")
+           .matcher(lowerText)
+           .results()
+           .count();
+       if (count > 0) {
+           legalTermCounts.put(term, (int) count);
+       }
+   }
+   
+   // Quality score
+   int qualityScore = calculatePDFQualityScore(pdfContent, sections, legalTermCounts);
+   
+   return new TCMetadata(
+       totalChars,
+       totalWords,
+       totalSections,
+       avgSectionLength,
+       legalTermCounts,
+       qualityScore,
+       "PDF Document"
+   );
+  ```
+  
+  }
+  
+  private int calculatePDFQualityScore(PDFContent pdfContent, List<TCSection> sections,
+  Map<String, Integer> legalTermCounts) {
+  int score = 0;
+  
+  ```
+   // Length bonus
+   int textLength = pdfContent.fullText.length();
+   if (textLength > 2000) score += 15;
+   if (textLength > 5000) score += 15;
+   if (textLength > 10000) score += 10;
+   
+   // Page count bonus
+   if (pdfContent.metadata.pageCount > 3) score += 10;
+   if (pdfContent.metadata.pageCount > 10) score += 10;
+   
+   // Section structure bonus
+   if (sections.size() >= 3) score += 15;
+   if (sections.size() >= 7) score += 10;
+   
+   // Legal terms bonus
+   score += Math.min(legalTermCounts.size() * 3, 20);
+   
+   // Metadata bonus
+   if (pdfContent.metadata.title != null) score += 5;
+   if (pdfContent.metadata.author != null) score += 5;
+   if (pdfContent.metadata.creationDate != null) score += 5;
+   
+   return Math.min(score, 100);
+  ```
+  
+  }
+  
+  private String extractFileName(String url) {
+  String fileName = url.substring(url.lastIndexOf(’/’) + 1);
+  if (!fileName.endsWith(”.pdf”)) {
+  fileName += “.pdf”;
+  }
+  // Clean filename
+  fileName = fileName.replaceAll(”[^a-zA-Z0-9.-]”, “*”);
+  return System.currentTimeMillis() + “*” + fileName;
+  }
+  
+  private static String extractDomainName(String url) {
+  try {
+  URI uri = URI.create(url);
+  String domain = uri.getHost();
+  return domain != null ? domain.replaceAll(”^www\.”, “”) : “unknown”;
+  } catch (Exception e) {
+  return “unknown”;
+  }
+  }
+  
+  public void saveToJson(TCDocument document, String filename) throws IOException {
+  objectMapper.writeValue(new File(filename), document);
+  System.out.println(“Saved JSON: “ + filename);
+  }
+  
+  public TCDocument loadFromJson(String filename) throws IOException {
+  return objectMapper.readValue(new File(filename), TCDocument.class);
+  }
+  
+  private void cleanupTempFiles() {
+  try {
+  Files.walk(Paths.get(TEMP_DIR))
+  .filter(Files::isRegularFile)
+  .forEach(path -> {
+  try {
+  Files.delete(path);
+  } catch (IOException e) {
+  System.err.println(“Failed to delete: “ + path);
+  }
+  });
+  Files.deleteIfExists(Paths.get(TEMP_DIR));
+  System.out.println(“Cleaned up temporary files”);
+  } catch (IOException e) {
+  System.err.println(“Failed to cleanup temp files: “ + e.getMessage());
+  }
+  }
+  }
+
+/**
+
+- Helper classes for PDF processing
+  */
+  class PDFContent {
+  public String fullText;
+  public List<String> pageTexts;
+  public PDFMetadata metadata;
+  
+  public PDFContent(String fullText, List<String> pageTexts, PDFMetadata metadata) {
+  this.fullText = fullText;
+  this.pageTexts = pageTexts;
+  this.metadata = metadata;
+  }
+  }
+
+class PDFMetadata {
+public String title;
+public String author;
+public String subject;
+public String creator;
+public String producer;
+public String creationDate;
+public String modificationDate;
+public int pageCount;
+
+```
+public PDFMetadata(String title, String author, String subject, String creator,
+                  String producer, String creationDate, String modificationDate, int pageCount) {
+    this.title = title;
+    this.author = author;
+    this.subject = subject;
+    this.creator = creator;
+    this.producer = producer;
+    this.creationDate = creationDate;
+    this.modificationDate = modificationDate;
+    this.pageCount = pageCount;
+}
+```
+
+}
+
+class SectionCandidate {
+public int lineIndex;
+public String title;
+public String pattern;
+
+```
+public SectionCandidate(int lineIndex, String title, String pattern) {
+    this.lineIndex = lineIndex;
+    this.title = title;
+    this.pattern = pattern;
+}
+```
+
+}
+
+// Reuse existing TCDocument, TCSection, TCMetadata classes from the HTML crawler
